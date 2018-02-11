@@ -5,8 +5,11 @@ module Main where
 import Foundation
 
 import qualified Data.Set as S
+import qualified Data.Tree as T
 import qualified Control.Monad.State.Lazy as St
 import qualified Control.Monad as M
+import Data.Foldable (foldMap)
+
 
 import qualified System.Random as R
 import Prelude (read)
@@ -25,18 +28,18 @@ type Random a = St.State R.StdGen a
 -- | Classic depth first search maze generator.
 maze :: Loc -> -- Current location
         (Int, Int) -> -- Boundary (upper right corner)
-        S.Set Edge -> -- Edges
         S.Set Loc -> -- Visited nodes
-        Random (S.Set Edge, S.Set Loc)
-maze loc boundary edges visited = do
-  neighbors <- shuffle $ adjacent loc -- Shuffle your neighbors
-  M.foldM visit (edges, visited) neighbors -- Visit them in a random order
-    where visit (edgesInner, visitedInner) aNeighbor =
+        Random (T.Tree Loc, S.Set Loc)
+maze loc boundary visited = do
+  shuffledNeighbors <- shuffle $ adjacent loc -- Shuffle your neighbors
+  (children, newVisited) <- M.foldM visit ([], visited) shuffledNeighbors -- Visit them
+  return (T.Node loc children, newVisited)
+    where visit (children, visitedInner) aNeighbor =
             if isValid visitedInner aNeighbor boundary then do
-              let newE = S.insert (loc, aNeighbor) edgesInner -- Your current node + next node forms an edge in the maze.
               let newV = S.insert aNeighbor visitedInner
-              maze aNeighbor boundary newE newV
-            else return (edgesInner, visitedInner)
+              (t, v) <- maze aNeighbor boundary newV
+              return (t : children, v)
+            else return (children, visitedInner)
 
 -- | Generate a list of adjacent locations
 adjacent :: Loc -> [Loc]
@@ -52,6 +55,32 @@ isValid visited loc@(Loc (x,y)) (maxHeight, maxWidth) =
   x <= maxHeight && y <= maxWidth &&
   x >= 0 && y >= 0
 
+newtype Solution = Solution {unSolution :: [Loc]} deriving (Eq, Show)
+
+-- | Monoid that takes the nonempty solution. If both are nonempty, then combine them.
+-- | Use this to short circuit to a solution in `solve`
+instance Monoid Solution where
+  mempty = Solution []
+  mappend (Solution x) (Solution y) = if null x then Solution y else Solution x
+
+-- | Solve with DFS, returning a list of the nodes in the path.
+solve :: Loc -> T.Tree Loc -> [Loc]
+solve end (T.Node loc children) =
+  if loc == end then [loc]
+  else unSolution $ foldMap visit children
+  where visit child =
+          let path = solve end child in
+            if null path then mempty
+            else Solution (loc : path)
+
+neighbors :: S.Set Edge -> Loc -> [Loc]
+neighbors edges loc =
+  let relevantEdges = S.filter isNeighbor edges
+      uniqNeighbors = foldMap (\(_,e) -> S.singleton e) relevantEdges
+  in
+    S.toList uniqNeighbors
+  where isNeighbor (n1, _) = loc == n1
+
 -- | Bespoke shuffle. Not sure why this doesn't exist already ><
 -- | Shuffle the tail, insert the head randomly.
 shuffle :: [a] -> Random [a]
@@ -66,32 +95,48 @@ shuffle (x:xs) = do
 
 -- | This is kind of cool in a horrible way. Use the list monad
 -- | to loop over the maze from left to right and pretty print it.
-mazeToString :: S.Set Edge -> (Int, Int) -> [Char]
-mazeToString edges (width, height) =
+mazeToString :: S.Set Edge -> (Int, Int) -> S.Set Loc -> [Char]
+mazeToString edges (width, height) solution =
   let mazeStr = do
         y <- [height, height-1 .. 0]
         x <- [0..width]
         (dir,open,closed) <- [(Loc (0, -1), ' ', '_'), (Loc (1, 0), '_', '|')]
         let nl = if x == width && dir == Loc (1,0) then "\n" else ""
         let wall = if x == 0 && dir == Loc (0,-1) then " |" else ""
-        let c = if (S.member (Loc (x,y), Loc (x,y) <> dir)  edges) || (S.member (Loc (x,y) <> dir, Loc (x,y)) edges) then [open] else [closed]
-        wall <> c <> nl
+        let c =  if (S.member (Loc (x,y), Loc (x,y) <> dir)  edges) || (S.member (Loc (x,y) <> dir, Loc (x,y)) edges) then [open] else [closed]
+        let cc =  if S.member (Loc (x,y)) solution then "\27[31m"<> c <>"\27[0m" else c 
+        wall <> cc <> nl
       top = " " <> replicate (CountOf (width*2)+1) '_' <> "\n"
   in
     top <> mazeStr
-  
+
+allEdges :: T.Tree Loc -> S.Set Edge
+allEdges (T.Node loc children) =
+  let childEdges = foldMap (\(T.Node l _) -> S.singleton (loc, l)) children
+      otherEdges = foldMap allEdges children
+  in
+    childEdges <> otherEdges
+
 main :: IO ()
 main = do
-  [widthStr, heightStr] <- getArgs
+  [widthStr, heightStr, seedStr, solveIt] <- getArgs
   let width :: Int = read (toList widthStr)
   let height :: Int = read (toList heightStr)
+  let seed :: Int = read (toList seedStr)
   let boundary = (width,height)
-  -- Start with an edge from below the maze into the bottom
-  -- left corner. This is the entry point!
-  let startEdges = (S.singleton (Loc (0,-1), Loc (0,0)))
+
   -- Generate the maze
-  let m = maze (Loc (0,0)) boundary startEdges (S.singleton (Loc (0,0)))
-  rand <- R.getStdGen
-  let (edges, _) = St.evalState m rand
+  let m = maze (Loc (0,0)) boundary (S.singleton (Loc (0,0))) 
+  let rand = R.mkStdGen seed
+  let (treeMaze, _) = St.evalState m rand
+
+  -- Solve
+  let solution = solve (Loc boundary) treeMaze
+
   -- Print it out.
-  putStrLn $ fromList $ mazeToString edges boundary
+  let edges = allEdges treeMaze
+  if solveIt /= "-s" then
+    putStrLn $ fromList $ mazeToString edges boundary (S.empty)
+  else
+    putStrLn $ fromList $ mazeToString edges boundary (S.fromList solution)
+
