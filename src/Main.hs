@@ -1,3 +1,6 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
@@ -6,13 +9,12 @@ import Foundation
 
 import qualified Data.Set as S
 import qualified Data.Tree as T
-import qualified Control.Monad.State.Lazy as St
+import qualified Control.Monad.State.Strict as St
 import qualified Control.Monad as M
 import Data.Foldable (foldMap)
-
+import Options.Generic
 
 import qualified System.Random as R
-import Prelude (read)
 
 --import qualified Debug.Trace as Debug
 
@@ -24,6 +26,15 @@ instance Monoid Loc where
   mappend (Loc (x1,y1)) (Loc (x2, y2)) = Loc (x1+x2, y1+y2)
 
 type Random a = St.State R.StdGen a
+
+data Options = Options
+  { solveOpt :: Bool <?> "Solve the maze."
+  , seedOpt :: Maybe Int <?> "Seed to generate the maze."
+  , widthOpt :: Int <?> "Width of the maze."
+  , heightOpt :: Int <?> "Height of the maze."
+  } deriving (Generic, Show)
+
+instance ParseRecord Options
 
 -- | Classic depth first search maze generator.
 maze :: Loc -> -- Current location
@@ -119,15 +130,19 @@ allEdges (T.Node loc children) =
 
 main :: IO ()
 main = do
-  [widthStr, heightStr, seedStr, solveIt] <- getArgs
-  let width :: Int = read (toList widthStr)
-  let height :: Int = read (toList heightStr)
-  let seed :: Int = read (toList seedStr)
+  options :: Options <- getRecord "Maze generator."
+  let width = unHelpful $ widthOpt options
+  let height = unHelpful $ heightOpt options
+  let seed = unHelpful $ seedOpt options
+  let shouldSolve = unHelpful $ solveOpt options
   let boundary = (width,height)
 
   -- Generate the maze
-  let m = maze (Loc (0,0)) boundary (S.singleton (Loc (0,0))) 
-  let rand = R.mkStdGen seed
+  let start = Loc (0,0)
+  let m = maze start boundary (S.singleton start) 
+  rand <- case seed of
+    Just s -> return $ R.mkStdGen s
+    Nothing -> R.getStdGen
   let (treeMaze, _) = St.evalState m rand
 
   -- Solve
@@ -135,8 +150,7 @@ main = do
 
   -- Print it out.
   let edges = allEdges treeMaze
-  if solveIt /= "-s" then
-    putStrLn $ fromList $ mazeToString edges boundary (S.empty)
-  else
+  if shouldSolve then
     putStrLn $ fromList $ mazeToString edges boundary (S.fromList solution)
-
+  else
+    putStrLn $ fromList $ mazeToString edges boundary (S.empty)
